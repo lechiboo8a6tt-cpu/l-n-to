@@ -9,7 +9,7 @@ import math
 import threading
 from flask import Flask, request
 
-TOKEN = "DÁN_TOKEN_MỚI_VÀO_ĐÂY"
+TOKEN = "MTUzNjI0NDg0Nzk0MDQ3NzAyMQ.GxtxDo.Y59uwW0DlRX-dbN1X08Lon3hhRVrc3Fsn7Zn5g"
 CLAN_NAME = "fxl"
 
 match_queue = []
