@@ -296,11 +296,19 @@ async def joinq(interaction: discord.Interaction):
         if CATEGORY_ID:
             cat = interaction.guild.get_channel(CATEGORY_ID)
         else:
-            ov = {interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False), bot.user: discord.PermissionOverwrite(read_messages=True)}
+            ov = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                bot.user: discord.PermissionOverwrite(read_messages=True)
+            }
             cat = await interaction.guild.create_category("ELO Match", overwrites=ov)
         name = f"match-{random.randint(100,999)}"
         try:
-            txt = await interaction.guild.create_text_channel(name, category=cat)
+            # SỬA LỖI: Cấp quyền read_messages cho cả 2 người chơi
+            player_overwrites = {
+                p1: discord.PermissionOverwrite(read_messages=True),
+                p2: discord.PermissionOverwrite(read_messages=True)
+            }
+            txt = await interaction.guild.create_text_channel(name, category=cat, overwrites=player_overwrites)
             voice = await interaction.guild.create_voice_channel(f"{name}-voice", category=cat)
             await txt.send(f"⚔️ {p1.mention} vs {p2.mention}\nReport with /report win or /report lose after match.")
             bot.active_matches[txt.id] = {"text": txt, "voice": voice, "winner": None, "loser": None}
