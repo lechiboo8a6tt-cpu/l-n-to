@@ -11,12 +11,11 @@ import threading
 from flask import Flask, request
 
 TOKEN = os.getenv("TOKEN")
-CLAN_NAME = "fxl"  # Sẽ xóa dòng này sau khi Deploy. Mình đã xóa bỏ xử lý Clan mặc định.
 
 # ------------------- CẤU HÌNH CHUNG -------------------
 CATEGORY_ID = None 
 
-# ------------------- FLASK WEBHOOK (GIỮ LẠI ĐỂ DÙNG SAU) -------------------
+# ------------------- FLASK WEBHOOK -------------------
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
@@ -30,12 +29,11 @@ class MyBot(discord.Client):
         super().__init__(intents=discord.Intents.all()) 
         self.tree = app_commands.CommandTree(self)
         self.db_path = "elo_data.db"
-        self.match_queue = [] # Hàng đợi chờ ghép trận
-        self.active_matches = {} # Lưu thông tin trận đang đấu
+        self.match_queue = [] 
+        self.active_matches = {} 
 
     async def setup_hook(self):
         async with aiosqlite.connect(self.db_path) as db:
-            # Bảng người chơi
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS players (
                     discord_id TEXT PRIMARY KEY,
@@ -47,7 +45,6 @@ class MyBot(discord.Client):
                     losses INTEGER DEFAULT 0
                 )
             ''')
-            # Bảng Clan (Đã thay đổi: thêm owner_id để quản lý)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS clans (
                     clan_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +52,6 @@ class MyBot(discord.Client):
                     owner_id TEXT
                 )
             ''')
-            # Bảng thành viên Clan (Liên kết clan_id)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS clan_members (
                     discord_id TEXT PRIMARY KEY,
@@ -64,7 +60,6 @@ class MyBot(discord.Client):
                     FOREIGN KEY(clan_id) REFERENCES clans(clan_id)
                 )
             ''')
-            # Bảng nội quy (Liên kết clan_id)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS clan_rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +70,6 @@ class MyBot(discord.Client):
                     FOREIGN KEY(clan_id) REFERENCES clans(clan_id)
                 )
             ''')
-            # Bảng lịch sử ELO
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS elo_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,31 +94,27 @@ async def init_player_if_not_exists(db, member: discord.Member):
     row = await cursor.fetchone()
     if not row:
         await db.execute('''
-            INSERT INTO players (discord_id, discord_name, elo, kills, wins, losses) 
-            VALUES (?, ?, 1000, 0, 0, 0)
-        ''', (str(member.id), member.name))
+            INSERT INTO players (discord_id, discord_name, game_name, elo, kills, wins, losses) 
+            VALUES (?, ?, ?, 1000, 0, 0, 0)
+        ''', (str(member.id), member.name, None))
         await db.commit()
 
-# Hàm lấy ID Clan của người dùng
 async def get_user_clan_id(db, discord_id):
     cursor = await db.execute("SELECT clan_id FROM clan_members WHERE discord_id = ?", (str(discord_id),))
     row = await cursor.fetchone()
     return row[0] if row else None
 
-# Hàm lấy Role của người dùng trong Clan
 async def get_member_role(db, discord_id):
     cursor = await db.execute("SELECT role FROM clan_members WHERE discord_id = ?", (str(discord_id),))
     row = await cursor.fetchone()
     return row[0] if row else None
 
-# Hàm kiểm tra quyền Kick
 async def has_permission_to_kick(kicker_role, target_role):
     hierarchy = ["member", "recruiter", "def_comander", "leader", "headcomander", "comander", "co_owner", "owner"]
     if kicker_role not in hierarchy or target_role not in hierarchy:
         return False
     return hierarchy.index(kicker_role) > hierarchy.index(target_role)
 
-# Tạo kênh trận đấu (Giữ nguyên)
 async def create_match_channels(guild: discord.Guild, players, teams):
     category = None
     if CATEGORY_ID:
@@ -158,34 +148,48 @@ async def create_match_channels(guild: discord.Guild, players, teams):
     }
     return text_channel
 
+# ------------------- LỆNH LIÊN KẾT TÊN GAME (ĐÃ CÓ LOGIC KHỞI TẠO ELO) -------------------
+@bot.tree.command(name="link", description="Liên kết tên Discord với tên trong Blockman Go")
+async def link_name(interaction: discord.Interaction, game_name: str):
+    await interaction.response.defer()
+    async with aiosqlite.connect(bot.db_path) as db:
+        # Kiểm tra xem tên game đã được đăng ký chưa
+        cursor = await db.execute("SELECT discord_id FROM players WHERE game_name = ?", (game_name,))
+        if await cursor.fetchone():
+            return await interaction.followup.send("❌ Tên game này đã có người khác đăng ký!", ephemeral=True)
+        
+        # Đảm bảo người dùng đã có trong bảng players (Nếu chưa có, tự động tạo mới với ELO = 1000)
+        await init_player_if_not_exists(db, interaction.user)
+        
+        # Cập nhật game_name
+        await db.execute("UPDATE players SET game_name = ? WHERE discord_id = ?", (game_name, str(interaction.user.id)))
+        await db.commit()
+        
+    await interaction.followup.send(f"✅ Đã liên kết tên game **{game_name}** với Discord của bạn! (ELO khởi tạo: 1000)")
+
 # ------------------- LỆNH TẠO CLAN MỚI -------------------
 @bot.tree.command(name="create_clan", description="Tạo Clan riêng cho bạn (Bạn sẽ là Owner)")
 async def create_clan(interaction: discord.Interaction, clan_name: str):
     await interaction.response.defer()
     async with aiosqlite.connect(bot.db_path) as db:
-        # Kiểm tra xem người dùng đã có clan chưa
         existing_clan = await get_user_clan_id(db, interaction.user.id)
         if existing_clan:
             return await interaction.followup.send("❌ Bạn đã có clan rồi! Không thể tạo thêm.", ephemeral=True)
         
-        # Kiểm tra xem tên clan đã tồn tại chưa
         cursor = await db.execute("SELECT clan_id FROM clans WHERE clan_name = ?", (clan_name,))
         if await cursor.fetchone():
             return await interaction.followup.send("❌ Tên Clan này đã có người đặt rồi! Hãy chọn tên khác.", ephemeral=True)
         
-        # Tạo Clan mới vào bảng `clans`
         await db.execute("INSERT INTO clans (clan_name, owner_id) VALUES (?, ?)", (clan_name, str(interaction.user.id)))
-        # Lấy ID của clan vừa tạo
         cursor = await db.execute("SELECT clan_id FROM clans WHERE clan_name = ?", (clan_name,))
         new_clan_id = (await cursor.fetchone())[0]
         
-        # Thêm người tạo vào bảng thành viên với role owner
         await db.execute("INSERT INTO clan_members (discord_id, clan_id, role) VALUES (?, ?, ?)", (str(interaction.user.id), new_clan_id, "owner"))
         await db.commit()
         
     await interaction.followup.send(f"✅ **Clan `{clan_name}` đã được tạo thành công!**\nBạn là **Owner** của clan này. Dùng `/invite` để mời bạn bè vào.")
 
-# ------------------- LỆNH CLAN (Đã cập nhật logic lấy clan_id từ người dùng) -------------------
+# ------------------- LỆNH CLAN -------------------
 @bot.tree.command(name="invite", description="Mời người chơi vào Clan của bạn")
 async def invite_clan(interaction: discord.Interaction, member: discord.Member):
     async with aiosqlite.connect(bot.db_path) as db:
@@ -354,20 +358,65 @@ async def leave_queue(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Bạn không có trong hàng đợi.", ephemeral=True)
 
 # ------------------- LỆNH BÁO CÁO KẾT QUẢ TRẬN ĐẤU -------------------
+@bot.tree.command(name="report", description="Báo cáo kết quả trận đấu (Dùng trong kênh match)")
+async def report_result(interaction: discord.Interaction, result: str):
+    channel_id = interaction.channel.id
+    if channel_id not in bot.active_matches:
+        return await interaction.response.send_message("❌ Lệnh này chỉ dùng được trong kênh trận đấu!", ephemeral=True)
+    
+    match_data = bot.active_matches[channel_id]
+    result = result.lower()
+    if result not in ["win", "lose"]:
+        return await interaction.response.send_message("❌ Chỉ chấp nhận `win` hoặc `lose`", ephemeral=True)
+    
+    if result == "win":
+        if match_data['confirmed_winner']:
+            return await interaction.response.send_message("Đã có người báo thắng rồi!", ephemeral=True)
+        match_data['confirmed_winner'] = interaction.user
+        await interaction.response.send_message(f"✅ {interaction.user.mention} báo thắng. Chờ đối thủ xác nhận...")
+    elif result == "lose":
+        if match_data['confirmed_loser']:
+            return await interaction.response.send_message("Đã có người báo thua rồi!", ephemeral=True)
+        match_data['confirmed_loser'] = interaction.user
+        await interaction.response.send_message(f"✅ {interaction.user.mention} báo thua. Chờ đối thủ xác nhận...")
+
+    if match_data['confirmed_winner'] and match_data['confirmed_loser']:
+        winner = match_data['confirmed_winner']
+        loser = match_data['confirmed_loser']
+        elo_gain = 15
+        elo_loss = 15
+        
+        async with aiosqlite.connect(bot.db_path) as db:
+            await db.execute('''UPDATE players SET elo = elo + ?, wins = wins + 1 WHERE discord_id = ?''', (elo_gain, str(winner.id)))
+            await db.execute('''UPDATE players SET elo = elo - ?, losses = losses + 1 WHERE discord_id = ?''', (elo_loss, str(loser.id)))
+            await db.execute("INSERT INTO elo_history (discord_id, elo_change, reason) VALUES (?, ?, ?)", (str(winner.id), elo_gain, "1v1 Match Win"))
+            await db.execute("INSERT INTO elo_history (discord_id, elo_change, reason) VALUES (?, ?, ?)", (str(loser.id), -elo_loss, "1v1 Match Lose"))
+            await db.commit()
+        
+        await interaction.channel.send(f"**🎉 Trận đấu kết thúc!**\n🏆 {winner.mention} thắng (+{elo_gain} ELO)\n💀 {loser.mention} thua (-{elo_loss} ELO)")
+        await asyncio.sleep(10)
+        await match_data['text_channel'].delete()
+        await match_data['voice_channel'].delete()
+        del bot.active_matches[channel_id]
+
+# ------------------- LỆNH RANK & PROFILE -------------------
 @bot.tree.command(name="profile", description="Xem thông tin của bạn")
 async def profile(interaction: discord.Interaction, member: discord.Member = None):
     target = member if member else interaction.user
     await interaction.response.defer()
     async with aiosqlite.connect(bot.db_path) as db:
         await init_player_if_not_exists(db, target)
-        cursor = await db.execute("SELECT elo, kills, wins, losses FROM players WHERE discord_id = ?", (str(target.id),))
+        cursor = await db.execute("SELECT elo, kills, wins, losses, game_name FROM players WHERE discord_id = ?", (str(target.id),))
         row = await cursor.fetchone()
-        elo, kills, wins, losses = row
+        if not row:
+            return await interaction.followup.send("❌ Người này chưa có dữ liệu.")
+        elo, kills, wins, losses, game_name = row
         embed = discord.Embed(title=f"{target.display_name}'s Stats", color=0xff5555)
         embed.add_field(name="🏆 ELO", value=f"**{elo}**", inline=True)
         embed.add_field(name="⚔️ Kills", value=str(kills), inline=True)
         embed.add_field(name="✅ Thắng", value=str(wins), inline=True)
         embed.add_field(name="💀 Thua", value=str(losses), inline=True)
+        embed.add_field(name="🎮 Game Name", value=game_name if game_name else "Chưa link", inline=True)
         await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="rank", description="Bảng xếp hạng ELO toàn cầu")
